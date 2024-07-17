@@ -1,14 +1,15 @@
-"""Script to download repository files and calculate their SHA256 hashes."""
-
 import asyncio
 import hashlib
-import os
+import tempfile
+import logging
 from pathlib import Path
-from typing import List
 
 import aiofiles
 import httpx
 import tqdm
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 URL = "https://gitea.radium.group/radium/project-configuration/archive/master.zip"
 CHUNK_SIZE = 8192
@@ -46,21 +47,29 @@ def calculate_sha256(file_path: Path) -> str:
 
 async def main() -> None:
     """Main function to download files and calculate their hashes."""
-    project_dir = Path(__file__).resolve().parent
-    filenames = [project_dir / f'project_configuration_{i}.zip' for i in range(3)]
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        filenames = [temp_path / f'project_configuration_{i}.zip' for i in range(3)]
 
-    download_tasks = [download_file(URL, filename) for filename in filenames]
-    await asyncio.gather(*download_tasks)
+        download_tasks = [download_file(URL, filename) for filename in filenames]
+        await asyncio.gather(*download_tasks)
 
-    print("Files downloaded:")
-    for filename in filenames:
-        print(f" - {filename}")
+        logger.info("Files downloaded:")
+        for filename in filenames:
+            logger.info(f" - {filename}")
 
-    print("\nCalculating SHA256 hashes:")
-    for filename in filenames:
-        sha256 = calculate_sha256(filename)
-        print(f" - {filename}: {sha256}")
+        logger.info("\nCalculating SHA256 hashes:")
+        for filename in filenames:
+            sha256 = calculate_sha256(filename)
+            logger.info(f" - {filename}: {sha256}")
+
+        logger.info("All files have been processed. Temporary files will be deleted.")
+
+
+def run_main():
+    """Run the main function using asyncio.run."""
+    asyncio.run(main())
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    run_main()

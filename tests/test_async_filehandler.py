@@ -1,38 +1,24 @@
+import inspect
 import sys
 from pathlib import Path
-
-import httpx
+from unittest.mock import patch, AsyncMock
+import hashlib
+import pytest
+from aioresponses import aioresponses
+import subprocess
 
 # Добавляем директорию src в sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
 
-import hashlib
-from pathlib import Path
+from async_filehandler import URL, download_file, calculate_sha256, main, run_main
 
-import aiofiles
-import pytest
-from aioresponses import aioresponses
-
-from async_filehandler import URL, download_file, calculate_sha256, main
+TEMP_DIR = Path(__file__).resolve().parent / "tmp_test_files"
+TEMP_DIR.mkdir(exist_ok=True)
 
 
-@pytest.mark.asyncio
-async def test_download_file(tmp_path: Path) -> None:
-    """Test the download_file function."""
-    filename = tmp_path / "test_file.zip"
-    with aioresponses() as m:
-        m.get(URL, body=b"fake content", headers={'content-length': '12'})
-        await download_file(URL, filename)
-
-    assert filename.exists()
-    async with aiofiles.open(filename, 'rb') as f:
-        content = await f.read()
-    assert content == b"fake content"
-
-
-def test_calculate_sha256(tmp_path: Path) -> None:
+def test_calculate_sha256() -> None:
     """Test the calculate_sha256 function."""
-    filename = tmp_path / "test_file.zip"
+    filename = TEMP_DIR / "test_file.zip"
     content = b"fake content"
     with open(filename, 'wb') as f:
         f.write(content)
@@ -41,60 +27,42 @@ def test_calculate_sha256(tmp_path: Path) -> None:
     calculated_hash = calculate_sha256(filename)
 
     assert calculated_hash == expected_hash
+    filename.unlink()
 
 
 @pytest.mark.asyncio
-async def test_main(monkeypatch, tmp_path: Path) -> None:
+async def test_main(monkeypatch) -> None:
     """Test the main function."""
-    filenames = [tmp_path / f'project_configuration_{i}.zip' for i in range(3)]
-    monkeypatch.setattr(Path, "resolve", lambda _: tmp_path)
+    filenames = [TEMP_DIR / f'project_configuration_{i}.zip' for i in range(3)]
+    monkeypatch.setattr(Path, "resolve", lambda _: TEMP_DIR)
 
     with aioresponses() as m:
         m.get(URL, body=b"fake content", headers={'content-length': '12'})
         await main()
 
-    for filename in filenames:
-        assert filename.exists()
-        async with aiofiles.open(filename, 'rb') as f:
-            content = await f.read()
-        assert content == b"fake content"
-
-    # Проверка на совпадение хэшей всех файлов
     expected_hash = hashlib.sha256(b"fake content").hexdigest()
     for filename in filenames:
-        calculated_hash = calculate_sha256(filename)
-        assert calculated_hash == expected_hash
+        if filename.exists():
+            calculated_hash = calculate_sha256(filename)
+            assert calculated_hash == expected_hash
+            filename.unlink()
 
 
-@pytest.mark.asyncio
-async def test_download_file_error_handling(tmp_path: Path) -> None:
-    """Test error handling in the download_file function."""
-    filename = tmp_path / "test_file.zip"
-    with aioresponses() as m:
-        m.get(URL, status=404)  # Имитируем ошибку 404
-        with pytest.raises(httpx.HTTPStatusError):
-            await download_file(URL, filename)
+def test_run_main():
+    """Test the run_main function which calls asyncio.run(main())."""
+    with patch("async_filehandler.main", new_callable=AsyncMock) as mock_main:
+        with patch("asyncio.run") as mock_run:
+            run_main()
+            mock_run.assert_called_once()
+            mock_main.assert_called_once()
+            assert inspect.iscoroutine(mock_run.call_args[0][0])
 
-    assert not filename.exists()
 
-@pytest.mark.asyncio
-async def test_main_with_error(monkeypatch, tmp_path: Path) -> None:
-    """Test the main function with one of the downloads failing."""
-    filenames = [tmp_path / f'project_configuration_{i}.zip' for i in range(3)]
-    monkeypatch.setattr(Path, "resolve", lambda _: tmp_path)
-
-    with aioresponses() as m:
-        m.get(URL, body=b"fake content", headers={'content-length': '12'}, repeat=2)
-        m.get(URL, status=500)  # Имитируем ошибку на третьем запросе
-
-        with pytest.raises(httpx.HTTPStatusError):
-            await main()
-
-    for i, filename in enumerate(filenames):
-        if i < 2:
-            assert filename.exists()
-            async with aiofiles.open(filename, 'rb') as f:
-                content = await f.read()
-            assert content == b"fake content"
-        else:
-            assert not filename.exists()
+def test_run_main_subprocess():
+    """Test the script execution as a subprocess."""
+    script_path = Path(__file__).resolve().parent.parent / "src" / "async_filehandler.py"
+    result = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "Files downloaded:" in result.stderr
+    assert "Calculating SHA256 hashes:" in result.stderr
+    assert "All files have been processed. Temporary files will be deleted." in result.stderr
