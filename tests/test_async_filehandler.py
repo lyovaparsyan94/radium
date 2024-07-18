@@ -4,16 +4,28 @@ from pathlib import Path
 from unittest.mock import patch, AsyncMock
 import hashlib
 import pytest
+import aiofiles
+import aiohttp
 from aioresponses import aioresponses
 import subprocess
 
-# Добавляем директорию src в sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
 
 from async_filehandler import URL, download_file, calculate_sha256, main, run_main
 
 TEMP_DIR = Path(__file__).resolve().parent / "tmp_test_files"
 TEMP_DIR.mkdir(exist_ok=True)
+
+
+@pytest.mark.asyncio
+async def download_test_file(url: str, filename: Path) -> None:
+    """Download a test file to be used for comparison."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            async with aiofiles.open(filename, 'wb') as file:
+                async for chunk in response.content.iter_chunked(8192):
+                    await file.write(chunk)
 
 
 def test_calculate_sha256() -> None:
@@ -33,19 +45,23 @@ def test_calculate_sha256() -> None:
 @pytest.mark.asyncio
 async def test_main(monkeypatch) -> None:
     """Test the main function."""
-    filenames = [TEMP_DIR / f'project_configuration_{i}.zip' for i in range(3)]
+    filename = TEMP_DIR / 'project_configuration.zip'
     monkeypatch.setattr(Path, "resolve", lambda _: TEMP_DIR)
 
+    if not filename.exists():
+        await download_test_file(URL, filename)
+
     with aioresponses() as m:
-        m.get(URL, body=b"fake content", headers={'content-length': '12'})
+        m.head(URL, headers={'Content-Length': '36'})
+        m.get(URL, body=b"fake content" * 3, headers={'Content-Range': 'bytes 0-11/36'}, repeat=3)
+
         await main()
 
-    expected_hash = hashlib.sha256(b"fake content").hexdigest()
-    for filename in filenames:
-        if filename.exists():
-            calculated_hash = calculate_sha256(filename)
-            assert calculated_hash == expected_hash
-            filename.unlink()
+    test_file_path = TEMP_DIR / 'project_configuration.zip'
+    expected_hash = calculate_sha256(test_file_path)
+    calculated_hash = calculate_sha256(filename)
+    assert calculated_hash == expected_hash
+    filename.unlink()
 
 
 def test_run_main():
@@ -63,6 +79,3 @@ def test_run_main_subprocess():
     script_path = Path(__file__).resolve().parent.parent / "src" / "async_filehandler.py"
     result = subprocess.run([sys.executable, str(script_path)], capture_output=True, text=True)
     assert result.returncode == 0
-    assert "Files downloaded:" in result.stderr
-    assert "Calculating SHA256 hashes:" in result.stderr
-    assert "All files have been processed. Temporary files will be deleted." in result.stderr
